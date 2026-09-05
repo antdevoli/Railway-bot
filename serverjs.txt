@@ -1,0 +1,433 @@
+// ============================================================
+// 🤖 ربات تلگرام هوش مصنوعی — نسخه Railway
+// تبدیل‌شده از Cloudflare Workers به Express/Node.js
+// ============================================================
+import express from 'express'
+import { storeGet, storeSet, storeDel } from './store.js'
+
+const app = express()
+app.use(express.json({ limit: '50mb' }))
+app.use(express.urlencoded({ extended: true }))
+
+const PORT = process.env.PORT || 3000
+
+// ============================================================
+// متغیرهای محیطی
+// ============================================================
+const ENV = {
+  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
+  API_KEY: process.env.API_KEY || '',
+  BASE_URL: process.env.BASE_URL || '',
+  API_TYPE: process.env.API_TYPE || '',
+  BOT_USERNAME: process.env.BOT_USERNAME || '',
+  ALLOWED_USERS: process.env.ALLOWED_USERS || '',
+  ANTHROPIC_API_KEY: process.env.API_KEY || process.env.ANTHROPIC_API_KEY || '',
+  ANTHROPIC_BASE_URL: process.env.BASE_URL || process.env.ANTHROPIC_BASE_URL || '',
+}
+
+// ============================================================
+// STORE (جایگزین KV)
+// ============================================================
+const MAX = 1000, TTL = 86400, KVMAX = 20 * 1024 * 1024
+
+async function kg(k) {
+  return await storeGet(k)
+}
+async function kp(k, v, t) {
+  await storeSet(k, v, t || TTL)
+}
+async function kd(k) {
+  await storeDel(k)
+}
+async function gh(i) {
+  return (await kg('c:' + i + ':h')) || []
+}
+async function sh(i, m) {
+  let arr = m.slice(-MAX)
+  while (arr.length > 1 && JSON.stringify(arr).length > KVMAX) arr = arr.slice(1)
+  try {
+    await kp('c:' + i + ':h', arr, TTL)
+  } catch {    try { await kp('c:' + i + ':h', arr.slice(-8), TTL) } catch {}
+  }
+}
+async function ah(i, r, c) {
+  const h = await gh(i)
+  h.push({ role: r, content: c })
+  await sh(i, h)
+  return h
+}
+async function ch(i) { await kd('c:' + i + ':h') }
+async function gm(i) { return (await kg('c:' + i + ':m')) || {} }
+async function sm(i, m_) { await kp('c:' + i + ':m', m_, TTL * 7) }
+
+// ============================================================
+// CONFIG
+// ============================================================
+let _cfgCache = null
+let _atCache = null
+
+async function getCfg() {
+  if (_cfgCache) return _cfgCache
+  const c = await kg('_config')
+  if (c) _cfgCache = c
+  return c || {}
+}
+async function saveCfg(data) {
+  _cfgCache = data
+  _atCache = null
+  await kp('_config', data)
+}
+
+// ============================================================
+// TELEGRAM API
+// ============================================================
+async function tgT() {
+  const c = await getCfg()
+  if (c.telegramToken) return c.telegramToken
+  return ENV.TELEGRAM_BOT_TOKEN
+}
+async function tgA() {
+  return 'https://api.telegram.org/bot' + (await tgT())
+}
+async function tgS(id, t, op) {
+  const bd = { chat_id: id, text: t, parse_mode: 'Markdown', disable_web_page_preview: true, ...op }
+  const j = await (await fetch((await tgA()) + '/sendMessage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bd)
+  })).json()
+  if (j && j.ok) return j
+  delete bd.parse_mode
+  return (await fetch((await tgA()) + '/sendMessage', {    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bd)
+  })).json()
+}
+async function tgAc(id, a) {
+  await fetch((await tgA()) + '/sendChatAction', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: id, action: a || 'typing' })
+  })
+}
+async function tgE(id, mid, t, op) {
+  const bd = { chat_id: id, message_id: mid, text: t, parse_mode: 'Markdown', disable_web_page_preview: true, ...(op || {}) }
+  try {
+    const j = await (await fetch((await tgA()) + '/editMessageText', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bd)
+    })).json()
+    if (j && j.ok) return true
+    delete bd.parse_mode
+    const j2 = await (await fetch((await tgA()) + '/editMessageText', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bd)
+    })).json()
+    return !!(j2 && j2.ok)
+  } catch { return false }
+}
+async function tgCb(id, txt) {
+  try {
+    await fetch((await tgA()) + '/answerCallbackQuery', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: id, ...(txt ? { text: txt } : {}) })
+    })
+  } catch {}
+}
+function isC(t) { return t && t.startsWith('/') }
+
+// ============================================================
+// FILE DOWNLOAD
+// ============================================================
+async function tgFile(fid) {
+  const r = await (await fetch((await tgA()) + '/getFile?file_id=' + fid)).json()
+  return r.ok ? r.result : null
+}
+async function tgDL(fp) {
+  const r = await fetch('https://api.telegram.org/file/bot' + (await tgT()) + '/' + fp)
+  const b = await r.arrayBuffer()
+  const e = (fp.split('.').pop() || 'bin').toLowerCase()
+  const mt = { jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',pdf:'application/pdf',txt:'text/plain' }[e] || 'application/octet-stream'
+  let s = ''
+  new Uint8Array(b).forEach(c => { s += String.fromCharCode(c) })
+  return { b64: btoa(s), mime: mt, ext: e, name: fp.split('/').pop() || 'file', size: b.byteLength }
+}
+// ---- فایل‌های متنی ----
+const MAXFILECHARS = 50000
+const TEXTEXT = ['txt','md','markdown','csv','tsv','json','jsonl','ndjson','xml','yaml','yml','html','htm','css','scss','less','js','mjs','cjs','ts','tsx','jsx','py','java','c','cc','cpp','h','hpp','cs','go','rs','rb','php','sql','sh','bash','zsh','bat','ps1','ini','conf','cfg','toml','log','env','tex','r','kt','kts','swift','dart','vue','svelte','pl','lua','scala','gradle','properties','srt','vtt','gitignore','dockerfile','makefile','asm','m','vb','fs','clj','ex','exs','erl','hs','jl','nim','zig','proto','graphql','gql','rst','org','tsv']
+function b64ToBytes(b64) { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u }
+function b64ToText(b64) { try { return new TextDecoder('utf-8', { fatal: false }).decode(b64ToBytes(b64)) } catch { return '' } }
+function isTextFile(md) {
+  if (!md) return false
+  if (md.mime && (md.mime.indexOf('text/') === 0 || md.mime === 'application/json' || md.mime === 'application/xml' || md.mime === 'application/javascript')) return true
+  const n = (md.name || '').toLowerCase()
+  if (TEXTEXT.indexOf(md.ext) >= 0) return true
+  if (n === 'dockerfile' || n === 'makefile' || n === '.gitignore' || n === '.env') return true
+  return false
+}
+
+// ============================================================
+// MODE & API ROUTER
+// ============================================================
+async function getMode(i) {
+  const me = await gm(i)
+  if (me.mode) return me.mode
+  const c = await getCfg()
+  return c.defaultMode || 'instant'
+}
+function modeCfg(mode) {
+  if (mode === 'think') return {
+    sp: '\n\nمهم: قبل از پاسخ نهایی، مسئله را گام‌به‌گام و عمیق تحلیل کن. ابتدا بخش «🤔 تحلیل:» را بنویس، سپس بخش «✅ پاسخ:» را ارائه بده.',
+    mx: 8192, ph: '🧠 در حال تفکر عمیق...'
+  }
+  return {
+    sp: '\n\nمهم: مستقیم، کوتاه و سریع پاسخ بده.',
+    mx: 2048, ph: '⚡ در حال پاسخ...'
+  }
+}
+
+async function akey() {
+  const c = await getCfg()
+  if (c.apiKey) return c.apiKey
+  if (ENV.API_KEY) return ENV.API_KEY
+  if (ENV.ANTHROPIC_API_KEY) return ENV.ANTHROPIC_API_KEY
+  return ''
+}
+function normBase(u) {
+  if (!u) return ''
+  return u.trim().replace(/\/+$/, '').replace(/\/v1$/i, '')
+}
+async function base() {
+  const c = await getCfg()
+  if (c.baseUrl) return normBase(c.baseUrl)
+  if (ENV.BASE_URL) return normBase(ENV.BASE_URL)
+  if (ENV.ANTHROPIC_BASE_URL) return normBase(ENV.ANTHROPIC_BASE_URL)  return 'https://api.anthropic.com'
+}
+async function at() {
+  if (_atCache) return _atCache
+  const c = await getCfg()
+  if (c.apiType) { _atCache = c.apiType.toLowerCase() === 'openai' ? 'openai' : 'anthropic'; return _atCache }
+  if (ENV.API_TYPE) { _atCache = ENV.API_TYPE.toLowerCase() === 'openai' ? 'openai' : 'anthropic'; return _atCache }
+  const b = (await base()).toLowerCase()
+  if (b.includes('anthropic') || b.includes('claude') || b.includes('agentrouter')) { _atCache = 'anthropic'; return _atCache }
+  _atCache = 'openai'
+  return _atCache
+}
+
+// ============================================================
+// API CALLS
+// ============================================================
+const UA = 'claude-cli/1.0.0 (external, cli)'
+function hdrOA(k) { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + k, 'User-Agent': UA } }
+function hdrANT(k) { return { 'Content-Type': 'application/json', 'x-api-key': k, 'anthropic-version': '2023-06-01', 'User-Agent': UA } }
+
+async function apim() {
+  const t = await at(), b = await base(), k = await akey()
+  let ms = null, errs = []
+  async function tryList(h, label) {
+    if (ms) return
+    try {
+      const r = await fetch(b + '/v1/models', { headers: h })
+      if (r.ok) {
+        const d = await r.json()
+        const arr = d.data || d.models || (Array.isArray(d) ? d : null)
+        if (arr && arr.length) { ms = arr; return }
+      }
+      errs.push(label + ': ' + r.status + ' ' + (await r.text()).replace(/\s+/g, ' ').substring(0, 120))
+    } catch (e) { errs.push(label + ': ' + e.message.substring(0, 80)) }
+  }
+  if (t === 'openai') { await tryList(hdrOA(k), 'OpenAI'); await tryList(hdrANT(k), 'Anthropic') }
+  else { await tryList(hdrANT(k), 'Anthropic'); await tryList(hdrOA(k), 'OpenAI') }
+  if (!ms) throw new Error('دریافت لیست مدل‌ها ممکن نشد\n' + errs.join('\n'))
+  return ms.filter(m => m && (m.id || typeof m === 'string')).map(m => typeof m === 'string' ? { id: m } : m)
+}
+
+function convContent(c, to) {
+  if (typeof c === 'string' || !Array.isArray(c)) return c
+  return c.map(p => {
+    if (!p || typeof p !== 'object') return p
+    if (to === 'anthropic') {
+      if (p.type === 'image_url' && p.image_url && p.image_url.url) {
+        const mm = /^data:([^;]+);base64,(.+)$/.exec(p.image_url.url)
+        if (mm) return { type: 'image', source: { type: 'base64', media_type: mm[1], data: mm[2] } }
+      }      if (p.type === 'file' && p.file && p.file.file_data) {
+        const fm = /^data:([^;]+);base64,(.+)$/.exec(p.file.file_data)
+        if (fm) return { type: 'document', source: { type: 'base64', media_type: fm[1], data: fm[2] } }
+      }
+      if (p.type === 'document') return { type: 'document', source: p.source }
+      return p
+    }
+    if (p.type === 'image' && p.source && p.source.type === 'base64') return { type: 'image_url', image_url: { url: 'data:' + p.source.media_type + ';base64,' + p.source.data, detail: 'high' } }
+    if (p.type === 'document' && p.source && p.source.type === 'base64') return { type: 'file', file: { filename: p._name || 'file.pdf', file_data: 'data:' + p.source.media_type + ';base64,' + p.source.data } }
+    return p
+  })
+}
+function toAnthMsgs(m) { return m.filter(x => x.role !== 'system').map(x => ({ role: x.role, content: convContent(x.content, 'anthropic') })) }
+function toOpenAIMsgs(sp, m) {
+  const out = [{ role: 'system', content: sp }]
+  for (const msg of m) { if (msg.role === 'system') continue; out.push({ role: msg.role, content: convContent(msg.content, 'openai') }) }
+  return out
+}
+function parseNonStream(raw, type) {
+  try {
+    const o = JSON.parse(raw)
+    if (type === 'openai') {
+      const c = o.choices && o.choices[0] && (o.choices[0].message || o.choices[0].delta || {}).content
+      if (typeof c === 'string') return c
+      if (Array.isArray(c)) return c.map(x => x.text || x.content || '').join('')
+    } else {
+      if (Array.isArray(o.content)) return o.content.map(x => x.text || '').join('')
+      if (typeof o.content === 'string') return o.content
+    }
+  } catch {}
+  return ''
+}
+
+const DEF_OA = 'gpt-4o', DEF_ANT = 'claude-sonnet-4-6'
+function isAnthModel(n) { return /claude/i.test(n || '') }
+function isOAModel(n) { return /^(gpt|o[13]|chatgpt|gemini|deepseek|llama|mistral|qwen|grok)/i.test(n || '') }
+function modelFor(fmt, model) {
+  if (!model) return fmt === 'anthropic' ? DEF_ANT : DEF_OA
+  if (fmt === 'anthropic' && isOAModel(model)) return DEF_ANT
+  if (fmt === 'openai' && isAnthModel(model)) return model
+  return model
+}
+
+async function aistream(s, m, model, oc, mx) {
+  const t = await at(), k = await akey(), b = await base()
+  let r = ''
+  const mOA = modelFor('openai', model), mANT = modelFor('anthropic', model)
+  if (t === 'openai') {
+    try { r = await oaiStr(b, k, toOpenAIMsgs(s, m), mOA, oc, mx) } catch { r = await antStr(b, k, s, toAnthMsgs(m), mANT, oc, mx) }
+  } else {    try { r = await antStr(b, k, s, toAnthMsgs(m), mANT, oc, mx) } catch { r = await oaiStr(b, k, toOpenAIMsgs(s, m), mOA, oc, mx) }
+  }
+  if (!r || !r.trim()) {
+    if (t === 'openai') { try { r = await antStr(b, k, s, toAnthMsgs(m), mANT, oc, mx) } catch {} }
+    else { try { r = await oaiStr(b, k, toOpenAIMsgs(s, m), mOA, oc, mx) } catch {} }
+  }
+  return r
+}
+
+async function oaiStr(b, k, m, model, oc, mx) {
+  const r = await fetch(b + '/v1/chat/completions', {
+    method: 'POST', headers: hdrOA(k),
+    body: JSON.stringify({ model, messages: m, stream: true, max_tokens: mx || 4096 })
+  })
+  if (!r.ok) throw new Error('OpenAI Error (' + r.status + '): ' + (await r.text()).substring(0, 300))
+  const rd = r.body.getReader(), dc = new TextDecoder()
+  let buf = '', full = '', raw = '', any = false
+  while (true) {
+    const { done, value } = await rd.read()
+    if (done) break
+    const chunk = dc.decode(value, { stream: true })
+    raw += chunk; buf += chunk
+    const ls = buf.split('\n'); buf = ls.pop() || ''
+    for (const l of ls) {
+      const t = l.trim()
+      if (!t.startsWith('data:')) continue
+      const j = t.slice(6).trim()
+      if (j === '[DONE]') continue
+      try {
+        const e = JSON.parse(j), c = e.choices?.[0]?.delta?.content || ''
+        if (c) { full += c; any = true; oc(full) }
+      } catch {}
+    }
+  }
+  if (!any) { const p = parseNonStream(raw, 'openai'); if (p) { full = p; oc(full) } }
+  return full
+}
+
+async function antStr(b, k, s, m, model, oc, mx) {
+  const r = await fetch(b + '/v1/messages', {
+    method: 'POST', headers: hdrANT(k),
+    body: JSON.stringify({ model, max_tokens: mx || 4096, system: s, messages: m, stream: true })
+  })
+  if (!r.ok) throw new Error('Anthropic Error (' + r.status + '): ' + (await r.text()).substring(0, 300))
+  const rd = r.body.getReader(), dc = new TextDecoder()
+  let buf = '', full = '', raw = '', any = false
+  while (true) {
+    const { done, value } = await rd.read()
+    if (done) break
+    const chunk = dc.decode(value, { stream: true })    raw += chunk; buf += chunk
+    const ls = buf.split('\n'); buf = ls.pop() || ''
+    for (const l of ls) {
+      const t = l.trim()
+      if (!t.startsWith('data:')) continue
+      const j = t.slice(6).trim()
+      if (j === '[DONE]') continue
+      try {
+        const e = JSON.parse(j)
+        if (e.type === 'content_block_delta' && e.delta?.text) { full += e.delta.text; any = true; oc(full) }
+      } catch {}
+    }
+  }
+  if (!any) { const p = parseNonStream(raw, 'anthropic'); if (p) { full = p; oc(full) } }
+  return full
+}
+
+// ============================================================
+// MEDIA HELPERS
+// ============================================================
+const VIDEXT = ['mp4','mov','avi','mkv','webm','flv','wmv','m4v','3gp','mpeg','mpg','ogv']
+function docExt(m) { return ((m.document && m.document.file_name || '').split('.').pop() || '').toLowerCase() }
+function isVidDoc(m) { return !!(m.document && (((m.document.mime_type || '').indexOf('video/') === 0) || VIDEXT.indexOf(docExt(m)) >= 0)) }
+function isGifDoc(m) { return !!(m.document && (((m.document.mime_type || '').toLowerCase() === 'image/gif') || docExt(m) === 'gif')) }
+function isVideoMsg(m) { return !!(m.video || m.video_note || m.animation) || isVidDoc(m) }
+function isUnsupportedMedia(m) { return isVideoMsg(m) || isGifDoc(m) }
+function bestPhoto(p) { let b = p[0]; for (let i = 1; i < p.length; i++) if (p[i].file_size > (b.file_size || 0)) b = p[i]; return b }
+
+// ============================================================
+// KEYBOARDS
+// ============================================================
+const BTN_MENU = '📋 منو', BTN_NEW = '🔄 گفتگوی جدید', BTN_MODE = '🎚️ حالت پاسخ', BTN_MODELS = '🧩 مدل‌ها', BTN_SETTINGS = '⚙️ تنظیمات', BTN_HELP = '📖 راهنما'
+function kbBottom() {
+  return { keyboard: [[{ text: BTN_MENU }, { text: BTN_NEW }], [{ text: BTN_MODE }, { text: BTN_MODELS }], [{ text: BTN_SETTINGS }, { text: BTN_HELP }]], resize_keyboard: true, is_persistent: true, input_field_placeholder: 'پیام خود را بنویسید...' }
+}
+function bottomBtnCmd(t) {
+  switch ((t || '').trim()) {
+    case BTN_MENU: return '/start'
+    case BTN_NEW: return '/reset'
+    case BTN_MODE: return '/mode'
+    case BTN_MODELS: return '/models'
+    case BTN_SETTINGS: return '/settings'
+    case BTN_HELP: return '/help'
+    default: return null
+  }
+}
+function kbMain() {
+  return { inline_keyboard: [
+    [{ text: '⚡ پاسخ سریع', callback_data: 'm:instant' }, { text: '🧠 تفکر عمیق', callback_data: 'm:think' }],
+    [{ text: '🧩 مدل‌ها', callback_data: 'menu:models' }, { text: '⚙️ تنظیمات', callback_data: 'menu:settings' }, { text: '📊 وضعیت', callback_data: 'menu:stats' }],    [{ text: '🔄 گفتگوی جدید', callback_data: 'reset:1' }, { text: '📖 راهنما', callback_data: 'menu:help' }]
+  ] }
+}
+function kbRegen() { return { inline_keyboard: [[{ text: '🔄 پاسخ مجدد', callback_data: 'regen:1' }]] } }
+function kbBack() { return { inline_keyboard: [[{ text: '🔙 بازگشت به منو', callback_data: 'menu:main' }]] } }
+async function kbMode(i) {
+  const cur = await getMode(i)
+  return { inline_keyboard: [[
+    { text: (cur === 'instant' ? '✅ ' : '') + '⚡ سریع', callback_data: 'm:instant' },
+    { text: (cur === 'think' ? '✅ ' : '') + '🧠 تفکر عمیق', callback_data: 'm:think' }
+  ]] }
+}
+function kbSettings() {
+  return { inline_keyboard: [
+    [{ text: '🎚️ حالت پاسخ', callback_data: 'menu:mode' }, { text: '🧩 مدل فعلی', callback_data: 'menu:models' }],
+    [{ text: '📝 System Prompt', callback_data: 'menu:sysprompt' }, { text: 'ℹ️ درباره ربات', callback_data: 'menu:about' }],
+    [{ text: '🔙 بازگشت به منو', callback_data: 'menu:main' }]
+  ] }
+}
+async function mdlKb(i) {
+  const m = await apim(), me = await gm(i), cr = me.model || ''
+  const rows = []
+  for (let xi = 0; xi < m.length && rows.length < 15; xi++) {
+    const id = m[xi].id, cb = 'mdl:' + id
+    if (cb.length > 60) continue
+    rows.push([{ text: (id === cr ? '✅ ' : '') + id, callback_data: cb }])
+  }
+  rows.push([{ text: '🔙 بازگشت', callback_data: 'menu:settings' }])
+  return { inline_keyboard: rows }
+}
+
+// ============================================================
+// COMMAND TEXTS
+// ============================================================
+async function d() { return (await at()) === 'openai' ? 'OpenAI' : 'Anthropic' }
+async function stTxt() {
+  const n = await d()
+  return '▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n🤖 به ربات هوش مصنوعی خوش آمدید!\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n🧩 API: ' + n + '\n📡 سرور: `' + (await base()) + '`\n\n🚀 قابلیت‌ها:\n├ 💬 چت هوشمند با مدل‌های مختلف\n├ 📸 تحلیل عکس و PDF\n├ 📄 خواندن فایل‌های متنی و کد\n├ 🧠 تفکر عمیق / پاسخ سریع\n├ 📝 System Prompt دلخواه\n├ 👥 قابل استفاده در گروه‌ها\n├ 💾 تاریخچه هوشمند (تا ۱۰۰۰ پیام)\n└ 🌐 پشتیبانی OpenAI + Anthropic\n\nاز دکمه‌های زیر استفاده کنید یا مستقیم پیام بدید! 💬'
+}
+function hlpTxt() {
+  return '▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n📖 راهنمای کامل ربات\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n📋 دستورات:\n├ /start — صفحه اصلی\n├ /help — این راهنما\n├ /models — لیست مدل‌ها\n├ /model `name` — تغییر مدل\n├ /system `text` — تنظیم System Prompt\n├ /mode — تغییر حالت پاسخ\n├ /settings — تنظیمات گفتگو\n├ /reset — پاک کردن تاریخچه\n├ /stats — وضعیت و آمار\n└ /about — درباره ربات\n\n🖼️ ت

@@ -1,0 +1,17 @@
+{
+  "name": "telegram-ai-bot-railway",
+  "version": "1.0.0",
+  "description": "ربات تلگرام هوش مصنوعی - نسخه Railway",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

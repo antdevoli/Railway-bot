@@ -1,0 +1,30 @@
+# 🤖 ربات تلگرام هوش مصنوعی — نسخه Railway
+
+## 🚀 نصب روی Railway
+
+### روش ۱: از طریق داشبورد
+1. به [railway.app](https://railway.app) برید
+2. **New Project** → **Deploy from GitHub repo**
+3. این فایل‌ها رو توی ریپازیتوری بذارید
+4. در بخش **Variables** متغیرهای محیطی رو تنظیم کنید:
+   - `TELEGRAM_BOT_TOKEN`
+   - `API_KEY`
+   - `BASE_URL` (اختیاری)
+5. Railway خودش `npm install` و `npm start` رو اجرا می‌کنه
+6. **Settings → Networking → Generate Domain** یک دامنه بگیرید
+7. به آدرس دامنه برید → پنل تنظیمات باز می‌شه
+8. دکمه **تنظیم Webhook** رو بزنید
+
+### روش ۲: از طریق CLI
+```bash
+npm install -g @railway/cli
+railway login
+railway init
+railway variables set TELEGRAM_BOT_TOKEN="your-token" API_KEY="your-key"
+railway up
+```
+
+## ⚠️ نکات مهم
+- **Volume (اختیاری):** برای ذخیره دائمی تاریخچه، در Railway یک **Volume** بسازید و مسیر `/data` رو بهش وصل کنید. بدون Volume، تاریخچه با ریستارت پاک می‌شه.
+- **HTTPS:** Railway خودش SSL می‌ده. وب‌هوک تلگرام فقط روی HTTPS کار می‌کنه.
+- **دامنه:** حتماً از بخش Networking دامنه عمومی بگیرید تا تلگرام بتونه وب‌هوک رو صدا بزنه.
